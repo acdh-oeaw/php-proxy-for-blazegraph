@@ -16,7 +16,11 @@ service:
   internalPort: 5000
 
 ingress:
-  enabled: false
+  enabled: true
+  path: "/"
+  className: "traefik"
+  annotations:
+    cert-manager.io/cluster-issuer: acdh-prod
 
 readinessProbe:
   path: /healthz

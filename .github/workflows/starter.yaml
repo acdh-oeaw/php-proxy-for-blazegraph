@@ -1,0 +1,150 @@
+name: workflows starter
+
+on:
+  pull_request: {}
+  push: {}
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target GitHub environment
+        type: environment
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: build-and-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.event_name == 'pull_request' && github.base_ref == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image for validation
+        run: docker build --pull --tag php-proxy-for-blazegraph:ci .
+
+      - name: Smoke-test the proxy
+        run: |
+          container=$(docker run --detach --publish 127.0.0.1::5000 \
+            --env TRIPLESTORE_URL=http://127.0.0.1:8080 php-proxy-for-blazegraph:ci)
+          trap 'docker logs "$container"; docker rm --force "$container" > /dev/null' EXIT
+
+          docker exec --interactive "$container" sh -c 'cat > /tmp/index.php' <<'PHP'
+          <?php
+          echo $_SERVER['REQUEST_METHOD'] === 'POST' ? file_get_contents('php://input') : 'blazegraph-smoke';
+          PHP
+          docker exec --detach "$container" php -S 127.0.0.1:8080 -t /tmp
+          docker exec "$container" curl --fail --silent --show-error \
+            --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/
+
+          proxy="http://$(docker port "$container" 5000/tcp)"
+          status=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+            --retry-delay 1 --output /dev/null --write-out '%{http_code}' "$proxy/healthz")
+          test "$status" = 204
+          result=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+            --retry-delay 1 "$proxy/?query=ASK")
+          test "$result" = blazegraph-smoke
+          curl --fail --silent --show-error --dump-header headers.txt --output /dev/null "$proxy/?query=ASK"
+          grep --ignore-case '^X-Cache-Hit: 1' headers.txt
+          result=$(curl --fail --silent --show-error --data 'query=ASK' "$proxy/")
+          test "$result" = 'query=ASK'
+          docker exec "$container" /app/kubernetesCheck.sh
+
+  setup_workflow_env:
+    if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    outputs:
+      environment: ${{ steps.target.outputs.environment }}
+      registry_root: ${{ steps.target.outputs.registry_root }}
+      image_name: ${{ steps.target.outputs.image_name }}
+      default_port: "5000"
+      app_root: "/"
+    steps:
+      - name: Set deployment target and image
+        id: target
+        env:
+          DEPLOY_TARGET: ${{ inputs.environment || vars.DEPLOY_ENVIRONMENT || 'production' }}
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          {
+            printf 'environment=%s\n' "$DEPLOY_TARGET"
+            printf 'registry_root=ghcr.io/%s/\n' "${repository%/*}"
+            printf 'image_name=%s\n' "${repository#*/}"
+          } >> "$GITHUB_OUTPUT"
+
+  generate_workflow_vars:
+    needs: setup_workflow_env
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.setup_workflow_env.outputs.environment }}
+    outputs:
+      namespace: ${{ steps.config.outputs.namespace }}
+      app_name: ${{ steps.config.outputs.app_name }}
+      public_url: ${{ steps.config.outputs.public_url }}
+      ingress_base_domain: ${{ steps.config.outputs.ingress_base_domain }}
+    steps:
+      - name: Read deployment variables
+        id: config
+        env:
+          DEPLOY_NAMESPACE: ${{ vars.KUBE_NAMESPACE }}
+          RELEASE_NAME: ${{ vars.APP_NAME }}
+          DEPLOY_PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+          INGRESS_BASE_DOMAIN: ${{ vars.KUBE_INGRESS_BASE_DOMAIN }}
+        run: |
+          if [[ ! "$DEPLOY_NAMESPACE" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+            echo '::error::Set KUBE_NAMESPACE to an existing namespace in the target environment.'
+            exit 1
+          fi
+          if [[ -z "$RELEASE_NAME" ]]; then
+            RELEASE_NAME=$(printf '%s' "${GITHUB_REPOSITORY#*/}" |
+              tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//' |
+              cut -c1-24 | sed -E 's/-+$//')
+          fi
+          if [[ ! "$RELEASE_NAME" =~ ^[a-z0-9]([a-z0-9-]{0,22}[a-z0-9])?$ ]]; then
+            echo '::error::APP_NAME must be a release name of up to 24 lowercase letters, digits, or hyphens.'
+            exit 1
+          fi
+          if [[ -z "$DEPLOY_PUBLIC_URL" && -n "$INGRESS_BASE_DOMAIN" ]]; then
+            DEPLOY_PUBLIC_URL="https://$RELEASE_NAME.$INGRESS_BASE_DOMAIN"
+          fi
+          {
+            printf 'namespace=%s\n' "$DEPLOY_NAMESPACE"
+            printf 'app_name=%s\n' "$RELEASE_NAME"
+            printf 'public_url=%s\n' "$DEPLOY_PUBLIC_URL"
+            printf 'ingress_base_domain=%s\n' "$INGRESS_BASE_DOMAIN"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: [setup_workflow_env, generate_workflow_vars]
+    permissions:
+      contents: read
+      packages: write
+    uses: acdh-oeaw/gl-autodevops-minimal-port/.github/workflows/build-dockerfile-and-push-to-registry.yaml@fe4ebc4f61d9c865debc2775d895dfee75ce7228
+    with:
+      registry_root: ${{ needs.setup_workflow_env.outputs.registry_root }}
+      image_name: ${{ needs.setup_workflow_env.outputs.image_name }}
+      default_port: ${{ needs.setup_workflow_env.outputs.default_port }}
+
+  deploy:
+    needs: [setup_workflow_env, generate_workflow_vars, build]
+    permissions:
+      contents: read
+    uses: acdh-oeaw/gl-autodevops-minimal-port/.github/workflows/deploy.yml@fe4ebc4f61d9c865debc2775d895dfee75ce7228
+    secrets: inherit
+    with:
+      environment: ${{ needs.setup_workflow_env.outputs.environment }}
+      DOCKER_TAG: ${{ format('{0}{1}', needs.setup_workflow_env.outputs.registry_root, needs.setup_workflow_env.outputs.image_name) }}
+      APP_NAME: ${{ needs.generate_workflow_vars.outputs.app_name }}
+      APP_ROOT: ${{ needs.setup_workflow_env.outputs.app_root }}
+      KUBE_NAMESPACE: ${{ needs.generate_workflow_vars.outputs.namespace }}
+      KUBE_INGRESS_BASE_DOMAIN: ${{ needs.generate_workflow_vars.outputs.ingress_base_domain }}
+      PUBLIC_URL: ${{ needs.generate_workflow_vars.outputs.public_url }}
+      default_port: ${{ needs.setup_workflow_env.outputs.default_port }}

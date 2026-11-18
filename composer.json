@@ -1,6 +1,10 @@
 {
+    "name": "acdh-oeaw/php-proxy-for-blazegraph",
+    "description": "HTTP proxy with a filesystem cache for Blazegraph.",
+    "license": "MIT",
     "require": {
-            "guzzlehttp/guzzle": "^7"
+        "php": "~8.5.0",
+        "ext-curl": "*",
+        "guzzlehttp/guzzle": "^7.16"
     }
-
 }

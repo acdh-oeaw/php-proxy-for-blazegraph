@@ -1,19 +1,12 @@
-#!/bin/bash
-#
-# Runs the container keepalive test and cache pruning script
-#
+#!/bin/sh
+# Check the HTTP listener and prune the local proxy cache.
+set -eu
 
-curl -s http://127.0.0.1:5000 > /dev/null
-RET=$?
-if [ "$RET" != "0" ] ; then
-    echo "curl http://127.0.0.1:5000 failed with return code $RET"
-    exit $RET
+curl --silent --show-error --output /dev/null "http://127.0.0.1:${PORT:-5000}/"
+
+if [ -n "${MAX_CACHE_SIZE:-}" ]; then
+    set -- "$MAX_CACHE_SIZE"
+else
+    set --
 fi
-
-PHP=`which php`
-if [ "$PHP" == "" ] ; then
-    PHP=/app/.heroku/php/bin/php
-fi
-$PHP /app/clearCache.php $MAX_CACHE_SIZE
-
-exit 0
+exec php /app/clearCache.php "$@"

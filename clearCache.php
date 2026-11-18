@@ -1,4 +1,4 @@
-#!/usr/bin/php
+#!/usr/bin/env php
 <?php
 $sizeLimit = $argv[1] ?? 1024 * 1024 * 512; // 512 MB
 $cacheDir = $argv[2] ?? __DIR__ . '/cache';

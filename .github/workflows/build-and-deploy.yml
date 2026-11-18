@@ -1,48 +1,110 @@
-name: Create image and Deploy
+name: Build and deploy
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: build-and-deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  IMAGE_TAG: php-proxy-for-blazegraph:latest
-on:
-  push:
-    branches:
-      - 'master'
+  IMAGE: ghcr.io/acdh-oeaw/php-proxy-for-blazegraph
+
 jobs:
-  build_and_push_to_registry:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}   
-      - name: Pack Build
-        uses: dfreilich/pack-action@v2.1.1
-        with:
-          args: 'build tmp-cnb-image --builder heroku/buildpacks:20'
-      - name: Suggest default port 5000 within image
-        run: |
-          cat >> Dockerfile <<EOF  
-          FROM tmp-cnb-image
-          ENV PORT=5000
-          EXPOSE 5000          
-          EOF
-      - name: Build and push
-        uses: docker/build-push-action@v5
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          load: true
+          pull: true
           tags: |
-            ghcr.io/acdh-oeaw/${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Smoke-test the proxy
+        run: |
+          container=$(docker run --detach --publish 127.0.0.1::5000 \
+            --env TRIPLESTORE_URL=http://127.0.0.1:8080 "$IMAGE:latest")
+          trap 'docker logs "$container"; docker rm --force "$container" > /dev/null' EXIT
+
+          docker exec --interactive "$container" sh -c 'cat > /tmp/index.php' <<'PHP'
+          <?php
+          echo $_SERVER['REQUEST_METHOD'] === 'POST' ? file_get_contents('php://input') : 'blazegraph-smoke';
+          PHP
+          docker exec --detach "$container" php -S 127.0.0.1:8080 -t /tmp
+          docker exec "$container" curl --fail --silent --show-error \
+            --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/
+
+          proxy="http://$(docker port "$container" 5000/tcp)"
+          result=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+            --retry-delay 1 "$proxy/?query=ASK")
+          test "$result" = blazegraph-smoke
+          curl --fail --silent --show-error --dump-header headers.txt --output /dev/null "$proxy/?query=ASK"
+          grep --ignore-case '^X-Cache-Hit: 1' headers.txt
+          result=$(curl --fail --silent --show-error --data 'query=ASK' "$proxy/")
+          test "$result" = 'query=ASK'
+          docker exec "$container" /app/kubernetesCheck.sh
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push tested image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        run: |
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"
+
   rancher:
-    needs: build_and_push_to_registry
-    name: Deploy to rancher
-    runs-on: ubuntu-20.04
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ARCHE SPARQL
+            url_secret: RANCHERURL_ARCHE_SPARQL
+          - target: SK SPARQL
+            url_secret: RANCHERURL_SK_SPARQL
+    name: Deploy ${{ matrix.target }} to Rancher
     steps:
-    - name: Rancher Deploy Action
-      run: |
-        curl -i -X POST "${{ secrets.RANCHERURL_ARCHE_SPARQL }}?action=redeploy" -H "Authorization: Bearer ${{ secrets.RANCHER_BARER_TOKEN }}"
-        curl -i -X POST "${{ secrets.RANCHERURL_SK_SPARQL }}?action=redeploy" -H "Authorization: Bearer ${{ secrets.RANCHER_BARER_TOKEN }}"
+      - name: Request Rancher redeploy
+        env:
+          RANCHER_URL: ${{ secrets[matrix.url_secret] }}
+          RANCHER_TOKEN: ${{ secrets.RANCHER_BARER_TOKEN }}
+        run: |
+          if [ -z "$RANCHER_URL" ] || [ -z "$RANCHER_TOKEN" ]; then
+            echo '::error::Rancher URL or token is missing'
+            exit 1
+          fi
+
+          curl --fail --silent --show-error --max-time 60 --output /dev/null \
+            --request POST --header "Authorization: Bearer $RANCHER_TOKEN" \
+            "${RANCHER_URL}?action=redeploy"

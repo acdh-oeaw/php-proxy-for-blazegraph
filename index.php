@@ -26,12 +26,18 @@
 
 require_once __DIR__ . '/vendor/autoload.php';
 
-$baseUrl = $_SERVER["TRIPLESTORE_URL"];
-$hostHeader = $_SERVER["TRIPLESTORE_HOST_HEADER"] ?? parse_url($baseUrl,  PHP_URL_HOST);
+$baseUrl = getenv('TRIPLESTORE_URL');
+if ($baseUrl === false || $baseUrl === '') {
+    error_log('TRIPLESTORE_URL is not configured');
+    http_response_code(503);
+    exit();
+}
+$hostHeader = getenv('TRIPLESTORE_HOST_HEADER') ?: parse_url($baseUrl, PHP_URL_HOST);
 $skipResponseHeaders = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'host'];
 $cacheDir = __DIR__ . '/cache';
-$cacheValid = $_SERVER["CACHE_TIMEOUT"] ?? 7*24*60*60; // in seconds
-$credentials = ($_SERVER["DB_USER"] ?? '') . ':' . ($_SERVER["DB_PASSWORD"] ?? '');
+$cacheTimeout = getenv('CACHE_TIMEOUT');
+$cacheValid = $cacheTimeout === false ? 7 * 24 * 60 * 60 : (int) $cacheTimeout;
+$credentials = getenv('DB_USER') . ':' . getenv('DB_PASSWORD');
 
 $logFile = __DIR__ . '/log.csv';
 
@@ -58,7 +64,7 @@ $hash = sha1(filter_input(\INPUT_SERVER, 'REQUEST_URI') . filter_input(\INPUT_SE
 $path = $cacheDir . '/' . substr($hash, 0, 2) . '/' . substr($hash, 2, 2) . '/' . $hash;
 if (!$deny && file_exists($path) && file_exists($path . 'headers') && time() - filemtime($path) <= $cacheValid) {
     $headers = explode("\n", file_get_contents($path . 'headers'));
-    http_response_code(array_shift($headers));
+    http_response_code((int) array_shift($headers));
     foreach ($headers as $h => $v) {
          header($v);
     }
@@ -103,7 +109,7 @@ if ($method !== 'TRACE' && (isset($headers['content-type']) || isset($headers['c
     $input = fopen('php://input', 'r');
 }
 $options                    = [];
-$output                     = fopen($path, 'w');
+$output                     = \GuzzleHttp\Psr7\Utils::streamFor(\GuzzleHttp\Psr7\Utils::tryFopen($path, 'w'));
 $options['sink']            = $output;
 $options['verify']          = false;
 $options['allow_redirects'] = true;
@@ -129,25 +135,33 @@ $request = new \GuzzleHttp\Psr7\Request($method, $url, $headers, $input);
 
 // run the proxy request
 $t = microtime(true); // updated in the headers handler function
+$transferError = null;
 try {
-    $response = $client->send($request);
-} catch (\GuzzleHttp\Exception\RequestException $e) {
-    if ($e->hasResponse()) {
-        $response = $e->getResponse();
+    $client->send($request);
+} catch (\GuzzleHttp\Exception\TransferException $e) {
+    $transferError = $e;
+} finally {
+    $request->getBody()->close();
+    $output->close();
+}
+if ($transferError !== null) {
+    unlink($path);
+    if (is_file($path . 'headers')) {
+        unlink($path . 'headers');
     }
+    error_log('Blazegraph request failed: ' . get_class($transferError));
+    http_response_code(502);
+    exit();
 }
-if ($input) {
-    fclose($input);
-}
-fclose($output);
 
 $headers = explode("\n", file_get_contents($path . 'headers'));
-$status = array_shift($headers);
+$status = (int) array_shift($headers);
+http_response_code($status);
 foreach ($headers as $h => $v) {
     header($v);
 }
 readfile($path);
-if ((int) $status !== 200) {
+if ($status !== 200) {
     unlink($path);
     unlink($path . 'headers');
 }

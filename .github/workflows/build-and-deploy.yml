@@ -85,23 +85,15 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: ARCHE SPARQL
-            url_secret: RANCHERURL_ARCHE_SPARQL
-          - target: SK SPARQL
-            url_secret: RANCHERURL_SK_SPARQL
-    name: Deploy ${{ matrix.target }} to Rancher
+    name: Deploy INTAVIA SPARQL to Rancher
     steps:
       - name: Request Rancher redeploy
         env:
-          RANCHER_URL: ${{ secrets[matrix.url_secret] }}
+          RANCHER_URL: ${{ secrets.RANCHERURL_INTAVIA_SPARQL }}
           RANCHER_TOKEN: ${{ secrets.RANCHER_BARER_TOKEN }}
         run: |
           if [ -z "$RANCHER_URL" ] || [ -z "$RANCHER_TOKEN" ]; then
-            echo '::error::Rancher URL or token is missing'
+            echo '::error::RANCHERURL_INTAVIA_SPARQL or RANCHER_BARER_TOKEN is missing'
             exit 1
           fi
 

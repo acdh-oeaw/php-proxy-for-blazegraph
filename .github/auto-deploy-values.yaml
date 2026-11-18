@@ -1,0 +1,26 @@
+image:
+  repository: "$repository"
+  tag: "$tag"
+  secrets: []
+
+extraLabels:
+  ID: "$service_id"
+
+gitlab:
+  app: "$app_name"
+  envURL: "$repo_url"
+
+service:
+  url: "$public_url"
+  externalPort: 5000
+  internalPort: 5000
+
+ingress:
+  enabled: false
+
+readinessProbe:
+  path: /healthz
+
+livenessProbe:
+  probeType: exec
+  command: ["/app/kubernetesCheck.sh"]

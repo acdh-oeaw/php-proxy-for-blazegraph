@@ -21,7 +21,7 @@ WORKDIR /app
 
 COPY --from=dependencies /app/vendor ./vendor
 COPY index.php clearCache.php kubernetesCheck.sh ./
-COPY .user.ini /usr/local/etc/php/conf.d/zz-proxy.ini
+COPY docker/php.ini /usr/local/etc/php/conf.d/zz-proxy.ini
 COPY docker/apache.conf /etc/apache2/sites-available/000-default.conf
 
 RUN a2enmod rewrite \

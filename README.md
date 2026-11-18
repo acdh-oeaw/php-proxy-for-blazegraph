@@ -1,7 +1,7 @@
 # PHP proxy for Blazegraph
 
-The container runs PHP 8.5 with Apache and listens on port 5000 by default.
-Composer installs the dependencies from `composer.lock` during the image build.
+The container runs PHP 8.5 with Apache on port 5000. Composer installs the
+dependencies from `composer.lock` when building the image.
 
 ## Local Docker build
 
@@ -12,39 +12,40 @@ docker run --rm -p 127.0.0.1:5000:5000 \
   php-proxy-for-blazegraph
 ```
 
-## Deployment on Kubernetes
+## INTAVIA deployment
 
-1. Create or update the Rancher workload with the image
-   `ghcr.io/acdh-oeaw/php-proxy-for-blazegraph:latest` and container port `5000`.
-2. Configure the environment variables for the workload.
+Pull requests targeting `master` build and smoke-test the image. Pushes to
+`master` and manual runs on `master` call the
+[shared AutoDevOps workflows](https://github.com/acdh-oeaw/gl-autodevops-minimal-port)
+to publish the image to GHCR and deploy its commit-derived tag with Helm on
+ACDH Cluster 2. The shared Helm chart uses
+`.github/auto-deploy-values.yaml` from this repository.
 
-   | Variable | Value |
-   | --- | --- |
-   | `TRIPLESTORE_URL` | Required. Base URL of the upstream Blazegraph endpoint. |
-   | `TRIPLESTORE_HOST_HEADER` | Optional upstream Host header. Defaults to the host in `TRIPLESTORE_URL`. |
-   | `CACHE_TIMEOUT` | Cache lifetime in seconds. Defaults to `604800`. |
-   | `DB_USER`, `DB_PASSWORD` | Optional upstream HTTP Basic credentials. |
-   | `MAX_CACHE_SIZE` | Cache size limit in bytes. Defaults to `536870912` (512 MiB). |
-   | `WEB_CONCURRENCY` | Maximum number of Apache workers. Defaults to `8`. |
+Create the GitHub environment `intavia` and set its variables and secrets
+there. Keep the settings for any additional deployment in its own environment
+and point its deploy job to that environment.
 
-3. Set the Rancher `ID` label to the Redmine issue ID and configure the existing
-   command probe to run `/app/kubernetesCheck.sh`. The command checks the local
-   HTTP listener and prunes the cache. Use a probe interval of at least 60 seconds
-   if the cache is large.
+| Name | GitHub setting | Value |
+| --- | --- | --- |
+| `C2_KUBE_CONFIG` | Secret | Base64-encoded kubeconfig with access to the target namespace on Cluster 2. |
+| `KUBE_NAMESPACE` | Variable | Existing namespace for the INTAVIA release. Without this setting the shared workflow uses `intavia-sparql`. |
+| `K8S_SECRET_TRIPLESTORE_URL` | Variable or secret | Required upstream Blazegraph base URL. Store it as a secret if it contains sensitive details. |
+| `K8S_SECRET_TRIPLESTORE_HOST_HEADER` | Variable | Optional upstream Host header. Defaults to the host from the upstream URL. |
+| `K8S_SECRET_DB_USER`, `K8S_SECRET_DB_PASSWORD` | Secrets | Optional upstream HTTP Basic credentials. |
+| `K8S_SECRET_CACHE_TIMEOUT` | Variable | Cache lifetime in seconds. Defaults to `604800`. |
+| `K8S_SECRET_MAX_CACHE_SIZE` | Variable | Cache limit in bytes. Defaults to `536870912` (512 MiB). |
+| `K8S_SECRET_WEB_CONCURRENCY` | Variable | Apache worker limit. Defaults to `8`. |
+| `SERVICE_ID` | Variable | Optional Redmine ID for the Kubernetes `ID` label. |
+| `PUBLIC_URL` | Variable | Optional public endpoint for the deployment link and Helm ingress. |
+| `HELM_UPGRADE_EXTRA_ARGS` | Variable | Optional Helm overrides, such as an image pull secret or ingress settings. |
 
-## GitHub Actions
+The release is named `intavia-sparql` and creates a ClusterIP service
+`intavia-sparql-auto-deploy` on port `5000`. The readiness endpoint
+`/healthz` verifies that the proxy is configured without querying Blazegraph.
+The liveness command also prunes the local cache.
 
-Pull requests targeting `master` build and smoke-test the container. A push to
-`master` also publishes the tested image to GHCR with the commit SHA and
-`latest` tags, then requests a Rancher redeploy for INTAVIA SPARQL.
-
-The redeploy job uses the repository secrets `RANCHERURL_INTAVIA_SPARQL`
-and `RANCHER_BARER_TOKEN`. Set the URL secret to the workload API URL.
-The workflow appends `?action=redeploy`.
-
-## Deployment on docker-tools
-
-* Use a `PHPL` environment with PHP 8.5 and the cURL extension, and install the
-  dependencies with Composer.
-* Set `TRIPLESTORE_URL` and any optional environment variables in the
-  `EnvVars` property of `config.yaml`.
+For the first rollout, keep the existing public route in place. After the
+Helm workload is ready, point the existing Ingress in the target namespace at
+`intavia-sparql-auto-deploy:5000`. If Helm will manage the Ingress, set
+`PUBLIC_URL` and use `HELM_UPGRADE_EXTRA_ARGS` to enable the Ingress and set
+the cluster's ingress class and TLS options. Use one Ingress owner per host.

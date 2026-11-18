@@ -5,6 +5,7 @@ on:
     branches: [master]
   push:
     branches: [master]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -12,40 +13,26 @@ concurrency:
   group: build-and-deploy-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/acdh-oeaw/php-proxy-for-blazegraph
-
 jobs:
-  build:
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Build image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          pull: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+      - name: Build image for validation
+        run: docker build --pull --tag php-proxy-for-blazegraph:ci .
 
       - name: Smoke-test the proxy
         run: |
           container=$(docker run --detach --publish 127.0.0.1::5000 \
-            --env TRIPLESTORE_URL=http://127.0.0.1:8080 "$IMAGE:latest")
+            --env TRIPLESTORE_URL=http://127.0.0.1:8080 php-proxy-for-blazegraph:ci)
           trap 'docker logs "$container"; docker rm --force "$container" > /dev/null' EXIT
 
           docker exec --interactive "$container" sh -c 'cat > /tmp/index.php' <<'PHP'
@@ -57,6 +44,9 @@ jobs:
             --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/
 
           proxy="http://$(docker port "$container" 5000/tcp)"
+          status=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
+            --retry-delay 1 --output /dev/null --write-out '%{http_code}' "$proxy/healthz")
+          test "$status" = 204
           result=$(curl --fail --silent --show-error --retry 10 --retry-connrefused \
             --retry-delay 1 "$proxy/?query=ASK")
           test "$result" = blazegraph-smoke
@@ -66,37 +56,27 @@ jobs:
           test "$result" = 'query=ASK'
           docker exec "$container" /app/kubernetesCheck.sh
 
-      - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  build:
+    if: github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+      packages: write
+    uses: acdh-oeaw/gl-autodevops-minimal-port/.github/workflows/build-dockerfile-and-push-to-registry.yaml@fe4ebc4f61d9c865debc2775d895dfee75ce7228
+    with:
+      registry_root: ghcr.io/acdh-oeaw/
+      image_name: php-proxy-for-blazegraph
+      default_port: "5000"
 
-      - name: Push tested image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        run: |
-          docker push "$IMAGE:$GITHUB_SHA"
-          docker push "$IMAGE:latest"
-
-  rancher:
+  deploy-intavia:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    name: Deploy INTAVIA SPARQL to Rancher
-    steps:
-      - name: Request Rancher redeploy
-        env:
-          RANCHER_URL: ${{ secrets.RANCHERURL_INTAVIA_SPARQL }}
-          RANCHER_TOKEN: ${{ secrets.RANCHER_BARER_TOKEN }}
-        run: |
-          if [ -z "$RANCHER_URL" ] || [ -z "$RANCHER_TOKEN" ]; then
-            echo '::error::RANCHERURL_INTAVIA_SPARQL or RANCHER_BARER_TOKEN is missing'
-            exit 1
-          fi
-
-          curl --fail --silent --show-error --max-time 60 --output /dev/null \
-            --request POST --header "Authorization: Bearer $RANCHER_TOKEN" \
-            "${RANCHER_URL}?action=redeploy"
+    if: github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+    uses: acdh-oeaw/gl-autodevops-minimal-port/.github/workflows/deploy-cluster-2.yml@fe4ebc4f61d9c865debc2775d895dfee75ce7228
+    secrets: inherit
+    with:
+      environment: intavia
+      DOCKER_TAG: ghcr.io/acdh-oeaw/php-proxy-for-blazegraph
+      APP_NAME: intavia-sparql
+      APP_ROOT: /
+      default_port: "5000"

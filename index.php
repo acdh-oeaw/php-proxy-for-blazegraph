@@ -32,6 +32,10 @@ if ($baseUrl === false || $baseUrl === '') {
     http_response_code(503);
     exit();
 }
+if (($_SERVER['REQUEST_URI'] ?? '') === '/healthz') {
+    http_response_code(204);
+    exit();
+}
 $hostHeader = getenv('TRIPLESTORE_HOST_HEADER') ?: parse_url($baseUrl, PHP_URL_HOST);
 $skipResponseHeaders = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'host'];
 $cacheDir = __DIR__ . '/cache';

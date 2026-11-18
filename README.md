@@ -36,12 +36,11 @@ docker run --rm -p 127.0.0.1:5000:5000 \
 
 Pull requests targeting `master` build and smoke-test the container. A push to
 `master` also publishes the tested image to GHCR with the commit SHA and
-`latest` tags, then requests redeploys for ARCHE SPARQL and SK SPARQL.
+`latest` tags, then requests a Rancher redeploy for INTAVIA SPARQL.
 
-The redeploy jobs use the repository secrets `RANCHERURL_ARCHE_SPARQL`,
-`RANCHERURL_SK_SPARQL`, and `RANCHER_BARER_TOKEN`. To add another workload,
-create its Rancher URL secret and add it to the deployment matrix in
-`.github/workflows/build-and-deploy.yml`.
+The redeploy job uses the repository secrets `RANCHERURL_INTAVIA_SPARQL`
+and `RANCHER_BARER_TOKEN`. Set the URL secret to the workload API URL.
+The workflow appends `?action=redeploy`.
 
 ## Deployment on docker-tools
 
